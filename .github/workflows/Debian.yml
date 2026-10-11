@@ -14,7 +14,7 @@ on:
         required: true
         default: 'master'
       release:
-        description: 'Publish a GitHub release (tag builds use the upstream tag name, others nightly-<version>)'
+        description: 'Publish a GitHub release (tagged <upstream tag>-trixie, or nightly-<version>-trixie)'
         type: boolean
         default: false
 
@@ -146,18 +146,23 @@ jobs:
       run: |
         # Package version from the file name, e.g. wivrn_26.9-1_amd64.deb -> 26.9-1
         VERSION=$(basename debs/wivrn_*_amd64.deb | cut -d_ -f2)
+        # Distinct tag names so they never clash with upstream's tags
         if [ "$IS_TAG" = true ]; then
-          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$REF-trixie" >> "$GITHUB_OUTPUT"
         else
-          echo "tag=nightly-$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=nightly-$VERSION-trixie" >> "$GITHUB_OUTPUT"
         fi
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Release
       uses: softprops/action-gh-release@v3
       with:
+        # The tag goes on this fork's commit: GITHUB_TOKEN may not create tags on
+        # upstream commits whose .github/workflows differ from this repository's
         tag_name: ${{ steps.name.outputs.tag }}
-        target_commitish: ${{ needs.build.outputs.sha }}
+        target_commitish: ${{ github.sha }}
         name: WiVRn ${{ steps.name.outputs.version }} (Debian trixie)
+        body: |
+          Debian trixie packages (amd64, arm64) built from [${{ env.UPSTREAM }}@${{ inputs.ref }}](https://github.com/${{ env.UPSTREAM }}/tree/${{ needs.build.outputs.sha }}) (`${{ needs.build.outputs.sha }}`).
         prerelease: ${{ needs.build.outputs.is_tag != 'true' }}
         files: debs/wivrn_*.deb
