@@ -1,0 +1,120 @@
+name: Debian packages
+
+# Fork-only workflow: builds WiVRn server .deb packages for Debian trixie
+# (amd64 + arm64). Run manually from the Actions tab, picking a branch or tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a GitHub release with this tag name (blank = workflow artifacts only)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build trixie ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    steps:
+
+    - name: Install base tools
+      run: |
+        apt-get update
+        apt-get install --yes --no-install-recommends git wget ca-certificates python3 devscripts equivs
+
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        path: wivrn
+
+    - name: Install build dependencies
+      working-directory: wivrn
+      run: |
+        git config --global --add safe.directory "$PWD"
+        mk-build-deps --install --remove --tool "apt-get --yes --no-install-recommends" debian/control
+        # Dashboard and server dependencies not listed in debian/control
+        apt-get install --yes --no-install-recommends \
+          qt6-declarative-dev qt6-declarative-private-dev extra-cmake-modules \
+          libkirigami-dev libkf6i18n-dev libkf6coreaddons-dev libkf6qqc2desktopstyle-dev libkf6iconthemes-dev \
+          qml6-module-org-kde-kirigamiaddons-formcard \
+          libssl-dev librsvg2-dev librsvg2-bin libarchive-dev libpng-dev libdrm-dev \
+          libglib2.0-dev libglib2.0-dev-bin gettext spirv-tools pkexec
+
+    - name: Download monado
+      working-directory: wivrn
+      run: |
+        MONADO_COMMIT=$(cat monado-rev)
+        wget -q https://gitlab.freedesktop.org/monado/monado/-/archive/$MONADO_COMMIT/monado-$MONADO_COMMIT.tar.gz -O ../monado.tar.gz
+        mkdir monado-src
+        tar xzf ../monado.tar.gz --strip-components=1 -C monado-src
+
+    - name: Patch monado
+      working-directory: wivrn/monado-src
+      run: |
+        for p in ../patches/monado/*; do
+          patch -p1 --fuzz=0 --forward < "$p"
+        done
+
+    - name: Download stb
+      working-directory: wivrn
+      run: |
+        STB_COMMIT=$(grep -oP 'nothings/stb/archive/\K[0-9a-f]+' CMakeLists.txt)
+        wget -q https://github.com/nothings/stb/archive/$STB_COMMIT.tar.gz -O ../stb.tar.gz
+        mkdir stb-src
+        tar xzf ../stb.tar.gz --strip-components=1 -C stb-src
+
+    - name: Generate changelog
+      working-directory: wivrn
+      run: >
+        tools/gen_debian_changelog.py
+        --out debian/changelog
+        ${{ (startsWith(github.ref, 'refs/tags/') && '' ) || '--nightly' }}
+        --author "github-actions <41898282+github-actions@users.noreply.github.com>"
+        --distribution trixie;
+        cat debian/changelog
+
+    - name: Build package
+      working-directory: wivrn
+      run: dpkg-buildpackage --build=binary --no-sign
+
+    - name: Upload package
+      uses: actions/upload-artifact@v7
+      with:
+        name: wivrn-trixie-${{ matrix.arch }}
+        path: |
+          *.deb
+          *.ddeb
+
+  release:
+    name: Publish release
+    needs: build
+    if: inputs.release != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+
+    - name: Download packages
+      uses: actions/download-artifact@v8
+      with:
+        path: debs
+        pattern: wivrn-trixie-*
+        merge-multiple: true
+
+    - name: Release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: ${{ inputs.release }}
+        target_commitish: ${{ github.sha }}
+        name: WiVRn ${{ inputs.release }} (Debian trixie)
+        files: debs/*.deb
