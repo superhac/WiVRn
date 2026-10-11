@@ -1,15 +1,25 @@
 name: Debian packages
 
 # Fork-only workflow: builds WiVRn server .deb packages for Debian trixie
-# (amd64 + arm64). Run manually from the Actions tab, picking a branch or tag.
+# (amd64 + arm64) from any upstream ref. Run manually from the Actions tab.
+#
+#   ref = upstream tag (e.g. v26.9) -> version from metainfo, e.g. 26.9-1
+#   ref = branch or commit          -> nightly version, e.g. 26.9-12-gbc3e374b-1
 
 on:
   workflow_dispatch:
     inputs:
+      ref:
+        description: 'Upstream (WiVRn/WiVRn) tag, branch or commit to build'
+        required: true
+        default: 'master'
       release:
-        description: 'Publish a GitHub release with this tag name (blank = workflow artifacts only)'
-        required: false
-        default: ''
+        description: 'Publish a GitHub release (tag builds use the upstream tag name, others nightly-<version>)'
+        type: boolean
+        default: false
+
+env:
+  UPSTREAM: WiVRn/WiVRn
 
 jobs:
   build:
@@ -24,6 +34,9 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container: debian:trixie
+    outputs:
+      is_tag: ${{ steps.ref.outputs.is_tag }}
+      sha: ${{ steps.ref.outputs.sha }}
     steps:
 
     - name: Install base tools
@@ -33,14 +46,30 @@ jobs:
 
     - uses: actions/checkout@v6
       with:
+        repository: ${{ env.UPSTREAM }}
+        ref: ${{ inputs.ref }}
         fetch-depth: 0
         fetch-tags: true
         path: wivrn
 
+    - name: Resolve ref
+      id: ref
+      working-directory: wivrn
+      env:
+        REF: ${{ inputs.ref }}
+      run: |
+        git config --global --add safe.directory "$PWD"
+        if git show-ref --verify --quiet "refs/tags/$REF"; then
+          echo "is_tag=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_tag=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        git describe --tags --always
+
     - name: Install build dependencies
       working-directory: wivrn
       run: |
-        git config --global --add safe.directory "$PWD"
         mk-build-deps --install --remove --tool "apt-get --yes --no-install-recommends" debian/control
         # Dashboard and server dependencies not listed in debian/control
         apt-get install --yes --no-install-recommends \
@@ -78,7 +107,7 @@ jobs:
       run: >
         tools/gen_debian_changelog.py
         --out debian/changelog
-        ${{ (startsWith(github.ref, 'refs/tags/') && '' ) || '--nightly' }}
+        ${{ (steps.ref.outputs.is_tag == 'true' && '' ) || '--nightly' }}
         --author "github-actions <41898282+github-actions@users.noreply.github.com>"
         --distribution trixie;
         cat debian/changelog
@@ -91,14 +120,12 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: wivrn-trixie-${{ matrix.arch }}
-        path: |
-          *.deb
-          *.ddeb
+        path: '*.deb'
 
   release:
     name: Publish release
     needs: build
-    if: inputs.release != ''
+    if: inputs.release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -111,10 +138,26 @@ jobs:
         pattern: wivrn-trixie-*
         merge-multiple: true
 
+    - name: Release name
+      id: name
+      env:
+        REF: ${{ inputs.ref }}
+        IS_TAG: ${{ needs.build.outputs.is_tag }}
+      run: |
+        # Package version from the file name, e.g. wivrn_26.9-1_amd64.deb -> 26.9-1
+        VERSION=$(basename debs/wivrn_*_amd64.deb | cut -d_ -f2)
+        if [ "$IS_TAG" = true ]; then
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=nightly-$VERSION" >> "$GITHUB_OUTPUT"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
     - name: Release
       uses: softprops/action-gh-release@v3
       with:
-        tag_name: ${{ inputs.release }}
-        target_commitish: ${{ github.sha }}
-        name: WiVRn ${{ inputs.release }} (Debian trixie)
-        files: debs/*.deb
+        tag_name: ${{ steps.name.outputs.tag }}
+        target_commitish: ${{ needs.build.outputs.sha }}
+        name: WiVRn ${{ steps.name.outputs.version }} (Debian trixie)
+        prerelease: ${{ needs.build.outputs.is_tag != 'true' }}
+        files: debs/wivrn_*.deb
