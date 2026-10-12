@@ -67,6 +67,15 @@ jobs:
         echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
         git describe --tags --always
 
+    - name: Add dashboard runtime dependencies
+      working-directory: wivrn
+      # QML modules are loaded at runtime, so ${shlibs:Depends} cannot find them
+      run: |
+        QML_DEPENDS="qml6-module-qtquick, qml6-module-qtqml, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-dialogs, qml6-module-qtquick-templates, qml6-module-qtcore, qml6-module-qt-labs-platform, qml6-module-org-kde-kirigami, qml6-module-org-kde-kirigamiaddons-formcard, qml6-module-org-kde-coreaddons, qml6-module-org-kde-desktop"
+        grep -q '^ ${misc:Depends},$' debian/control
+        sed -i "s/^ \${misc:Depends},\$/ \${misc:Depends},\n $QML_DEPENDS,\nRecommends:\n kde-style-breeze,\n avahi-daemon,/" debian/control
+        sed -n '/^Package:/,$p' debian/control
+
     - name: Install build dependencies
       working-directory: wivrn
       run: |
